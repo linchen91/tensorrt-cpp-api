@@ -55,23 +55,42 @@ private:
 
 /// Byte size of a resolved (dtype, shape), with overflow checking -- the guard the buffer
 /// layer owes before any allocation. Errors (kInvalidArgument) on a dynamic shape or if
-/// the element count / byte size would overflow std::size_t. (GCC/Clang builtins; the
-/// library is Linux/GCC-Clang only.)
+/// the element count / byte size would overflow std::size_t.
 inline Result<std::size_t> checkedByteSize(DType dtype, const Shape &shape) {
     if (shape.isDynamic()) {
         return Status{StatusCode::kInvalidArgument, "checkedByteSize requires a fully resolved (non-dynamic) shape"};
     }
     std::size_t count = 1;
     for (int i = 0; i < shape.rank(); ++i) {
-        if (__builtin_mul_overflow(count, static_cast<std::size_t>(shape[i]), &count)) {
+        const auto dim = static_cast<std::size_t>(shape[i]);
+#if defined(_MSC_VER)
+        if (dim == 0) {
+            count = 0;
+            break;
+        }
+        if (count > SIZE_MAX / dim) {
             return Status{StatusCode::kInvalidArgument, "shape element count overflows std::size_t"};
         }
+        count *= dim;
+#else
+        if (__builtin_mul_overflow(count, dim, &count)) {
+            return Status{StatusCode::kInvalidArgument, "shape element count overflows std::size_t"};
+        }
+#endif
     }
     std::size_t totalBits = 0;
-    if (__builtin_mul_overflow(count, static_cast<std::size_t>(bitsPerElement(dtype)), &totalBits)) {
+    const auto bpe = static_cast<std::size_t>(bitsPerElement(dtype));
+#if defined(_MSC_VER)
+    if (count > SIZE_MAX / bpe) {
         return Status{StatusCode::kInvalidArgument, "tensor byte size overflows std::size_t"};
     }
-    if (totalBits > SIZE_MAX - 7) { // guard the round-up below from wrapping past SIZE_MAX
+    totalBits = count * bpe;
+#else
+    if (__builtin_mul_overflow(count, bpe, &totalBits)) {
+        return Status{StatusCode::kInvalidArgument, "tensor byte size overflows std::size_t"};
+    }
+#endif
+    if (totalBits > SIZE_MAX - 7) {
         return Status{StatusCode::kInvalidArgument, "tensor byte size overflows std::size_t"};
     }
     return (totalBits + 7) / 8;

@@ -8,7 +8,11 @@
 #include <string>
 #include <tuple>
 
+#ifdef _WIN32
+#include <process.h>
+#else
 #include <unistd.h>
+#endif
 
 namespace trtcpp::detail {
 namespace {
@@ -125,7 +129,12 @@ Status writeAtomic(const std::string &path, std::span<const std::byte> bytes) {
         std::filesystem::create_directories(target.parent_path(), ec);
     }
     // PID-suffixed temp so concurrent builders writing the same cache entry don't collide.
-    const std::filesystem::path tmp = target.string() + ".tmp." + std::to_string(::getpid());
+    const std::filesystem::path tmp = target.string() + ".tmp."
+#ifdef _WIN32
+        + std::to_string(::_getpid());
+#else
+        + std::to_string(::getpid());
+#endif
     {
         std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
         if (!out) {

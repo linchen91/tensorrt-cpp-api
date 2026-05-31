@@ -5,6 +5,7 @@
 // them explicitly when you build/link those modules.
 
 #include "tensorrt_cpp_api/build_config.h"
+#include "tensorrt_cpp_api/export.h"
 
 #include "tensorrt_cpp_api/dtype.h"
 #include "tensorrt_cpp_api/layout.h"

@@ -5,8 +5,11 @@
 #include <cstdio>
 #include <functional>
 #include <string>
-#include <unistd.h>
 #include <vector>
+
+#ifdef _WIN32
+#include <io.h>
+#endif
 
 using namespace trtcpp;
 
@@ -22,9 +25,18 @@ public:
     std::vector<Record> records;
 };
 
-// Capture everything written to the C stderr stream during fn() (Linux-only test util).
+// Capture everything written to the C stderr stream during fn().
 std::string captureStderr(const std::function<void()> &fn) {
     std::fflush(stderr);
+#ifdef _WIN32
+    int saved = _dup(_fileno(stderr));
+    FILE *tmp = std::tmpfile();
+    _dup2(_fileno(tmp), _fileno(stderr));
+    fn();
+    std::fflush(stderr);
+    _dup2(saved, _fileno(stderr));
+    _close(saved);
+#else
     int saved = dup(fileno(stderr));
     FILE *tmp = std::tmpfile();
     dup2(fileno(tmp), fileno(stderr));
@@ -32,6 +44,7 @@ std::string captureStderr(const std::function<void()> &fn) {
     std::fflush(stderr);
     dup2(saved, fileno(stderr));
     close(saved);
+#endif
     std::rewind(tmp);
     std::string out;
     char buf[512];

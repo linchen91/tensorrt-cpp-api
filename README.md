@@ -21,7 +21,7 @@
 a small, leak-free API: name-keyed tensors at the boundary, caller-owned CUDA streams, explicit
 host/device transfers, and a `Status`/`Result<T>` error model — no exceptions, no OpenCV or
 TensorRT types in the public headers. It targets **TensorRT ≥ 10** (built to the TensorRT 11
-surface), CUDA 12, C++20, Linux.
+surface), CUDA 12, C++20, Linux and Windows/MSVC.
 
 ```cpp
 #include <tensorrt_cpp_api/all.h>
@@ -70,11 +70,15 @@ int main() {
   get them back via `__cuda_array_interface__` / DLPack — no host round-trips, GIL released during
   inference. See [`examples/python`](examples/python).
 - **Installable.** `cmake --install` produces a `find_package(tensorrt_cpp_api)`-consumable package.
+- **Windows/MSVC support.** Full static and shared (DLL) library builds; MSVC-safe overflow checks
+  replace `__builtin_mul_overflow`; `DEBUG_POSTFIX` for side-by-side Debug/Release;
+  `TRTCPP_API` dllexport/dllimport annotations; stb-based examples run unmodified.
 
 ## Performance
 
-Single-stream inference latency on an **RTX 3080 Laptop GPU** (preallocated, zero-copy `enqueue`
-loop — `examples/benchmark`), TensorRT 10:
+Single-stream inference latency (preallocated, zero-copy `enqueue` loop — `examples/benchmark`):
+
+**RTX 3080 Laptop GPU** (TensorRT 10):
 
 | Model | Precision | Latency | Throughput |
 |---|---|---|---|
@@ -82,7 +86,31 @@ loop — `examples/benchmark`), TensorRT 10:
 | YOLOv8n | FP32 | 2.00 ms | 499 inf/s |
 | MobileNetV2 | FP16 | 0.31 ms | 3199 inf/s |
 
-Inference time is TensorRT-bound — it is the `enqueueV3` cost of the engine itself, so the wrapper
+**RTX 4060** (TensorRT 11, Windows/MSVC):
+
+| Model | Precision | Config | Latency | Throughput |
+|---|---|---|---|---|
+| YOLO11n | FP16 | Release | **1.59 ms** | 629 inf/s |
+| YOLO11n | FP16 | Debug | 1.60 ms | 627 inf/s |
+
+The two tables are **not directly comparable** — they differ in several dimensions:
+
+| Factor | RTX 3080 Laptop | RTX 4060 |
+|---|---|---|
+| GPU arch | Ampere GA104 | Ada Lovelace AD106 |
+| TGP / power | ~130 W (mobile) | ~115 W (desktop) |
+| TensorRT | 10 (Linux) | 11 (Windows) |
+| Model | YOLOv8n (v8 arch) | YOLO11n (v11 arch, ~15% larger GFLOPs) |
+| Compiler backend | disabled | enabled (TensorRT 11 default) |
+| Build config | Release (GCC) | Release (MSVC) |
+
+Debug and Release are within measurement noise (~0.3%): the GPU kernel execution dominates wall
+time, so the CPU-side Debug-vs-Release overhead is negligible in the GPU-bound inference path.
+
+The 3080 Laptop's lower latency reflects the lighter YOLOv8n model and Linux-native toolchain. The
+4060 results demonstrate that the library builds and runs correctly on Windows/MSVC with
+TensorRT 11, including the compiler-backed engine optimization path. Inference time is
+TensorRT-bound — it is the `enqueueV3` cost of the engine itself, so the wrapper
 adds **no** measurable inference overhead. The library's work is everything around that call:
 zero-copy name-keyed IO with no per-call allocations or nested-vector copies, a stream-ordered
 allocator, and the no-throw `Status`/`Result` API. The Python bindings run the same path within
@@ -98,6 +126,18 @@ cmake --build build -j$(nproc)
 cmake --install build --prefix /opt/trtcpp
 ```
 
+On Windows with MSVC:
+
+```sh
+cmake -S . -B build -DTensorRT_DIR=C:/TensorRT-10.x.x
+cmake --build build --config Release
+cmake --install build --prefix C:/trtcpp
+```
+
+Build as a shared (DLL) library with `-DBUILD_SHARED_LIBS=ON` (uses `TRTCPP_API` annotations from
+[`export.h`](include/tensorrt_cpp_api/export.h) for dllexport/dllimport). MSVC Debug builds append
+a `d` suffix to library and example binaries (e.g. `tensorrt_cpp_apid.lib`, `classificationd.exe`).
+
 Then in a downstream project:
 
 ```cmake
@@ -111,9 +151,38 @@ apt vs tarball TensorRT, build options, Python — are in [`docs/install.md`](do
 ## Examples
 
 [`examples/`](examples) has four runnable reference programs, each consuming the installed package:
-**classification** (ImageNet top-5), **detection** (YOLOv8n + NMS), **segmentation** (DeepLabV3),
-and a **zero-copy Python** demo with a C++/Python perf-parity benchmark. `examples/download_models.sh`
-fetches the models.
+**classification** (ImageNet top-5), **detection** (YOLOv8n/YOLO11 + NMS), **segmentation** (DeepLabV3),
+and a **benchmark** (C++ latency baseline). `examples/download_models.sh` fetches the models.
+
+| Example | Model | Data | Result |
+|---|---|---|---|
+| `classification` | MobileNetV2 (FP16) | 1920×1280 RGB | top-5 predicted, class 652 @ 42% |
+| `detection` | YOLO11n (FP16) | 1920×1280 RGB | 9 detections (all person, ≥70% conf) |
+| `segmentation` | DeepLabV3-MobileNetV3 (FP16) | 1920×1280 RGB | 21 classes, 65.9% background |
+| `benchmark` (Debug) | YOLO11n (FP16) | synthetic (preallocated) | 1.60 ms/infer (627 inf/s) over 1000 iters |
+| `benchmark` (Release) | YOLO11n (FP16) | synthetic (preallocated) | **1.59 ms/infer** (629 inf/s) over 1000 iters |
+
+Run any example from the project root (the binary path varies by build system):
+
+```sh
+# Linux (single-config, e.g. Make/Ninja)
+./build/examples/classification model.onnx image.jpg
+./build/examples/detection model.onnx image.jpg 0.25 out.jpg
+./build/examples/segmentation model.onnx image.jpg out.jpg
+./build/examples/benchmark model.onnx 200
+
+# Windows (MSVC multi-config, Debug — note the "d" suffix)
+.\build\examples\Debug\classificationd.exe model.onnx image.jpg
+.\build\examples\Debug\detectiond.exe model.onnx image.jpg 0.25 out.jpg
+.\build\examples\Debug\segmentationd.exe model.onnx image.jpg out.jpg
+.\build\examples\Debug\benchmarkd.exe model.onnx 200
+
+# Windows (MSVC multi-config, Release — no suffix)
+.\build\examples\Release\classification.exe model.onnx image.jpg
+.\build\examples\Release\detection.exe model.onnx image.jpg 0.25 out.jpg
+.\build\examples\Release\segmentation.exe model.onnx image.jpg out.jpg
+.\build\examples\Release\benchmark.exe model.onnx 200
+```
 
 ## Documentation
 
@@ -130,8 +199,9 @@ segmentation, pose).
 
 ## Scope
 
-Linux, CUDA 12, TensorRT ≥ 10, CNN-style vision models. Windows and LLM/transformer-specific
-features are out of scope.
+Linux (primary), CUDA 12, TensorRT ≥ 10, CNN-style vision models. Windows/MSVC is compile-tested
+and runtime-verified (static and shared builds, Debug and Release) but CI only covers Linux.
+LLM/transformer-specific features are out of scope.
 
 ## Contributing
 

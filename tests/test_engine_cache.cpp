@@ -93,8 +93,10 @@ TEST(EngineCache, WriteAtomicCreatesParentDirs) {
     ASSERT_TRUE(writeAtomic(path, bytes).ok());
     ASSERT_TRUE(std::filesystem::exists(path));
 
-    std::ifstream in(path, std::ios::binary);
-    const std::string back((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    EXPECT_EQ(back, data);
+    {
+        std::ifstream in(path, std::ios::binary);
+        const std::string back((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        EXPECT_EQ(back, data);
+    }
     std::filesystem::remove_all(dir);
 }

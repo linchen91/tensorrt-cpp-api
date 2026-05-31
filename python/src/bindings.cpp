@@ -193,9 +193,16 @@ void requireContiguousBytes(const std::vector<std::int64_t> &dims, DType dtype, 
         }
         // Overflow-checked: a malformed/huge shape from a foreign __cuda_array_interface__ must not
         // wrap `expected` into a value that spuriously matches a later stride.
+#if defined(_MSC_VER)
+        if (expected > INT64_MAX / dims[static_cast<std::size_t>(i)]) {
+            throw py::value_error("__cuda_array_interface__ shape is too large (stride overflow)");
+        }
+        expected *= dims[static_cast<std::size_t>(i)];
+#else
         if (__builtin_mul_overflow(expected, dims[static_cast<std::size_t>(i)], &expected)) {
             throw py::value_error("__cuda_array_interface__ shape is too large (stride overflow)");
         }
+#endif
     }
 }
 
@@ -239,7 +246,15 @@ TensorView viewFromDlpack(py::handle obj) {
         // DLPack strides are in ELEMENTS.
         std::int64_t expected = 1;
         for (int i = dt.ndim - 1; i >= 0; --i) {
+#if defined(_MSC_VER)
+            bool overflow = expected > INT64_MAX / dims[static_cast<std::size_t>(i)];
+            if (!overflow) {
+                expected *= dims[static_cast<std::size_t>(i)];
+            }
+            if (dt.strides[i] != expected || overflow) {
+#else
             if (dt.strides[i] != expected || __builtin_mul_overflow(expected, dims[static_cast<std::size_t>(i)], &expected)) {
+#endif
                 if (mt->deleter) {
                     mt->deleter(mt);
                 }
@@ -603,7 +618,7 @@ PYBIND11_MODULE(_core, m) {
             "load_from_memory",
             [](py::bytes data, const EngineOptions &opts) {
                 char *buf = nullptr;
-                ssize_t len = 0;
+                Py_ssize_t len = 0;
                 PYBIND11_BYTES_AS_STRING_AND_SIZE(data.ptr(), &buf, &len);
                 std::span<const std::byte> span(reinterpret_cast<const std::byte *>(buf), static_cast<std::size_t>(len));
                 std::optional<Result<Engine>> r;

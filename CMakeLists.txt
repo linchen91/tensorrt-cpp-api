@@ -11,6 +11,10 @@ option(TRT_CPP_API_BUILD_PREPROC "Build the fused preprocessing sublibrary" ON)
 option(TRT_CPP_API_BUILD_PYTHON "Build the pybind11 Python bindings" OFF)
 option(TRT_CPP_API_WITH_OPENCV "Build the optional OpenCV interop" OFF)
 option(TRT_CPP_API_WITH_SPDLOG "Build the optional spdlog logger adapter" OFF)
+option(BUILD_SHARED_LIBS "Build the library as a shared (DLL) library" OFF)
+if(MSVC AND BUILD_SHARED_LIBS)
+    set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
@@ -88,7 +92,16 @@ set_target_properties(
     tensorrt_cpp_api PROPERTIES CXX_EXTENSIONS OFF POSITION_INDEPENDENT_CODE ON VERSION ${PROJECT_VERSION}
                                 SOVERSION ${PROJECT_VERSION_MAJOR}
 )
-if(NOT MSVC)
+if(MSVC)
+    set_target_properties(tensorrt_cpp_api PROPERTIES DEBUG_POSTFIX "d")
+endif()
+if(MSVC)
+    target_compile_options(tensorrt_cpp_api PRIVATE /W3 /utf-8)
+    target_compile_definitions(tensorrt_cpp_api PRIVATE _CRT_SECURE_NO_WARNINGS)
+    if(BUILD_SHARED_LIBS)
+        target_compile_definitions(tensorrt_cpp_api PRIVATE TRTCPP_BUILD_SHARED)
+    endif()
+else()
     target_compile_options(tensorrt_cpp_api PRIVATE -Wall -Wextra)
 endif()
 

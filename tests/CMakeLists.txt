@@ -4,9 +4,13 @@ find_package(GTest QUIET)
 if(NOT GTest_FOUND)
     include(FetchContent)
     fetchcontent_declare(googletest GIT_REPOSITORY https://github.com/google/googletest.git GIT_TAG v1.15.2)
+    # gtest must be static on Windows so gtest_discover_tests can find it at build time.
+    set(_trtcpp_saved_bsl "${BUILD_SHARED_LIBS}")
+    set(BUILD_SHARED_LIBS OFF)
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
     set(INSTALL_GTEST OFF CACHE BOOL "" FORCE) # don't leak gtest into a consumer's install prefix
     fetchcontent_makeavailable(googletest)
+    set(BUILD_SHARED_LIBS "${_trtcpp_saved_bsl}" CACHE BOOL "" FORCE)
 endif()
 
 include(GoogleTest)
@@ -58,4 +62,18 @@ if(TARGET tensorrt_cpp_api::preproc)
     add_executable(trtcpp_preproc_tests test_preproc.cpp)
     target_link_libraries(trtcpp_preproc_tests PRIVATE tensorrt_cpp_api::preproc GTest::gtest_main)
     gtest_discover_tests(trtcpp_preproc_tests PROPERTIES LABELS "gpu")
+endif()
+
+# On Windows with a shared (DLL) core library, copy tensorrt_cpp_api.dll next to each
+# test executable at build time so gtest_discover_tests can run it to enumerate tests.
+if(MSVC AND BUILD_SHARED_LIBS)
+    foreach(_tgt trtcpp_core_tests trtcpp_cuda_tests trtcpp_trt_tests trtcpp_opencv_tests trtcpp_preproc_tests)
+        if(TARGET ${_tgt})
+            add_custom_command(TARGET ${_tgt} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "$<TARGET_FILE:tensorrt_cpp_api>" "$<TARGET_FILE_DIR:${_tgt}>/"
+                COMMAND_EXPAND_LISTS
+            )
+        endif()
+    endforeach()
 endif()
