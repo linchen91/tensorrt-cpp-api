@@ -172,42 +172,51 @@ The fused kernel is typically **2–5× faster** for preprocessing alone, with t
 larger output resolutions where the single fused launch avoids proportionally more overhead.
 
 **Full-pipeline comparison** (`examples/pipeline_comparison`) extends the benchmark across all
-three task types and breaks down every stage. Measured on the same system (640×640 BMP, 200 iters):
+three task types and breaks down every stage. Measured on RTX 4060 (TensorRT 11, CUDA 13.2,
+Windows, 810×1080 JPEG → network input, 200 iters, 50 warmup):
 
-| Stage | Without OpenCV | With OpenCV | Ratio |
+| Metric | Detection (yolov8n) | Classification (mobilenetv2) | Segmentation (deeplabv3) |
 |---|---|---|---|
-| **Detection** ||||
-| Decode | 2.32 ms | **0.79 ms** | **0.3×** |
-| Upload + Preprocess | **0.15 ms** | 0.27 ms | 1.8× |
-| Inference | **0.04 ms** | 0.04 ms | 1.0× |
-| Postprocess (NMS + write) | **9.76 ms** | 9.76 ms | 1.0× |
-| **Total** | 12.27 ms | **10.86 ms** | 1.1× |
-| **Classification** ||||
-| Decode | 2.60 ms | **0.89 ms** | **0.3×** |
-| Upload + Preprocess | **0.16 ms** | 0.29 ms | 1.8× |
-| Inference | **0.06 ms** | 0.06 ms | 1.0× |
-| Postprocess (softmax + top-5) | **2.40 ms** | 2.40 ms | 1.0× |
-| **Total** | 5.22 ms | **3.64 ms** | **1.4×** |
-| **Segmentation** ||||
-| Decode | 2.58 ms | **0.95 ms** | **0.3×** |
-| Upload + Preprocess | **0.13 ms** | 0.32 ms | 2.5× |
-| Inference | **0.06 ms** | 0.06 ms | 1.0× |
-| Postprocess (argmax + colorize + write) | **8.97 ms** | 8.97 ms | 1.0× |
-| **Total** | 11.74 ms | **10.30 ms** | 1.1× |
+| **Fused total** | 36.94 ms | 12.77 ms | 37.74 ms |
+| **OpenCV total** | 37.71 ms | 13.81 ms | 38.35 ms |
+| **Pipeline savings** | **0.77 ms** | **1.04 ms** | **0.61 ms** |
+| **Fused preproc** | 0.33 ms | 0.31 ms | 0.19 ms |
+| **OpenCV preproc** | 0.66 ms | 0.95 ms | 0.22 ms |
+| **Preproc speedup** | **2.0×** | **3.0×** | **1.2×** |
+| **Upload saved** | 0.61 ms | 0.66 ms | 0.62 ms |
+| **Decode (both)** | ~5.6 ms | ~5.6 ms | ~5.5 ms |
+| **Inference (both)** | 2.03 ms | 1.27 ms | 1.88 ms |
+| **Postproc (both)** | 28.93 ms | 5.48 ms | 30.12 ms |
+| **Num. diff (MSE)** | 5.21e+01 | 1.60e+01 | 1.77e+01 |
+
+Per-stage breakdown for detection (fused vs OpenCV):
+
+| Stage | Fused (ms) | OpenCV (ms) | Ratio |
+|---|---|---|---|
+| Decode | 5.65 | 5.48 | 1.03× |
+| Upload to GPU | 0.00 | 0.61 | 0.00× |
+| Preprocess | 0.33 | 0.66 | **0.50×** |
+| Inference | 2.03 | 2.03 | 1.00× |
+| Postprocess | 28.93 | 28.93 | 1.00× |
+| **Total** | **36.94** | **37.71** | **0.98×** |
 
 Key takeaways:
-- **cv::imread decodes ~3× faster** than stb on this platform (BMP; JPEG gap is smaller per I/O section below)
-- **Fused preproc (upload + kernel) is 1.8–2.5× faster** than the equivalent OpenCV GPU ops
+- **Fused preproc is 1.2–3.0× faster** than equivalent OpenCV GPU ops
+- **Fused path eliminates the upload step** (0.61–0.66 ms saved) by decoding direct to GPU
 - **Inference and postprocess are identical** — the engine doesn't know which path produced the input
-- **Overall pipeline favors OpenCV** (1.1–1.4×) because decode savings outweigh preproc overhead
-- **Preprocessing-only comparison** (isolated, no decode) shows the fused kernel at **4.3×** over OpenCV
+- **Overall pipeline favors fused** (0.92–0.98×) — preproc + upload savings outweigh decode differences
+- **Numerical differences** (MSE 1.6e+01–5.2e+01) from divergent resize interpolation / color conversion; expected and below model-level sensitivity at typical resolutions
 
-Inference outputs from both paths are numerically equivalent when the preproc output is on the same
-order — small differences come from divergent bilinear-interpolation rounding at extreme downscales
-and are well below model-level sensitivity at typical resolutions.
+Preprocessing-only comparison (isolated, no decode) on the same system (640×640, 500 iters):
+
+| Method | Avg (ms) | Img/s |
+|---|---|---|
+| Fused | **0.045** | 22 045 |
+| OpenCV | 0.091 | 10 955 |
+| **Ratio** | **2.0×** | |
 
 ```sh
-./build/examples/preproc_comparison yolov8n.onnx image.jpg 640 640 500 100
+./build/examples/preproc_comparison models/yolov8n.onnx models/test_img.jpg 640 640 500 100
 ./build/examples/pipeline_comparison detection yolov8n.onnx image.jpg out.jpg 200 50
 ./build/examples/pipeline_comparison classification mobilenetv2.onnx image.jpg
 ./build/examples/pipeline_comparison segmentation deeplabv3.onnx image.jpg
@@ -272,16 +281,16 @@ Run any example from the project root (the binary path varies by build system):
 ./build/examples/benchmark model.onnx 200
 
 # Windows (MSVC multi-config, Debug — note the "d" suffix)
-.\build\examples\Debug\classificationd.exe model.onnx image.jpg
+.\build\examples\Debug\classificationd.exe .\models\yolov8n.onnx .\models\test_img.jpg
 .\build\examples\Debug\detectiond.exe model.onnx image.jpg 0.25 out.jpg
 .\build\examples\Debug\segmentationd.exe model.onnx image.jpg out.jpg
-.\build\examples\Debug\benchmarkd.exe model.onnx 200
+.\build\examples\Debug\benchmarkd.exe .\models\yolov8n.onnx .\models\test_img.jpg 0.25 .\models\out.jpg
 
 # Windows (MSVC multi-config, Release — no suffix)
-.\build\examples\Release\classification.exe model.onnx image.jpg
+.\build\examples\Release\classification.exe .\models\yolov8n.onnx .\models\test_img.jpg
 .\build\examples\Release\detection.exe model.onnx image.jpg 0.25 out.jpg
 .\build\examples\Release\segmentation.exe model.onnx image.jpg out.jpg
-.\build\examples\Release\benchmark.exe model.onnx 200
+.\build\examples\Release\benchmark.exe .\models\yolov8n.onnx .\models\test_img.jpg 0.25 .\models\out.jpg
 ```
 
 ## Documentation
