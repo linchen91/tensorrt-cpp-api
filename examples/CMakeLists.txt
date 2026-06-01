@@ -42,10 +42,35 @@ if(MSVC)
     set_target_properties(benchmark PROPERTIES DEBUG_POSTFIX "d")
 endif()
 
+# OpenCV-dependent examples: fused preproc kernel vs OpenCV GPU operations.
+# Single find_package call -- components checked once; ${OpenCV_LIBS} available below.
+find_package(OpenCV QUIET COMPONENTS core imgproc imgcodecs cudawarping cudaimgproc cudaarithm)
+if(OpenCV_FOUND)
+    # Preprocessing-only benchmark (no model needed beyond timing context).
+    add_executable(preproc_comparison preproc_comparison/main.cpp ${CMAKE_CURRENT_SOURCE_DIR}/common/stb_impl.cpp)
+    target_link_libraries(preproc_comparison PRIVATE tensorrt_cpp_api::tensorrt_cpp_api tensorrt_cpp_api::preproc ${OpenCV_LIBS})
+    target_compile_features(preproc_comparison PRIVATE cxx_std_20)
+    if(MSVC)
+        target_compile_options(preproc_comparison PRIVATE ${TRTCPP_EXAMPLE_COMMON_FLAGS})
+        target_compile_definitions(preproc_comparison PRIVATE ${TRTCPP_EXAMPLE_COMMON_DEFS})
+        set_target_properties(preproc_comparison PROPERTIES DEBUG_POSTFIX "d")
+    endif()
+
+    # Full-pipeline comparison across detection/classification/segmentation.
+    add_executable(pipeline_comparison pipeline_comparison/main.cpp ${CMAKE_CURRENT_SOURCE_DIR}/common/stb_impl.cpp)
+    target_link_libraries(pipeline_comparison PRIVATE tensorrt_cpp_api::tensorrt_cpp_api tensorrt_cpp_api::preproc ${OpenCV_LIBS})
+    target_compile_features(pipeline_comparison PRIVATE cxx_std_20)
+    if(MSVC)
+        target_compile_options(pipeline_comparison PRIVATE ${TRTCPP_EXAMPLE_COMMON_FLAGS})
+        target_compile_definitions(pipeline_comparison PRIVATE ${TRTCPP_EXAMPLE_COMMON_DEFS})
+        set_target_properties(pipeline_comparison PROPERTIES DEBUG_POSTFIX "d")
+    endif()
+endif()
+
 # On Windows with a shared (DLL) core library, copy tensorrt_cpp_api.dll next to each
 # example executable at build time so they can run from the build directory.
 if(MSVC AND BUILD_SHARED_LIBS)
-    foreach(_tgt classification detection segmentation benchmark)
+    foreach(_tgt classification detection segmentation benchmark preproc_comparison pipeline_comparison)
         if(TARGET ${_tgt})
             add_custom_command(TARGET ${_tgt} POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
