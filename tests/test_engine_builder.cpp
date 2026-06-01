@@ -67,17 +67,20 @@ TEST(EngineBuilder, GarbageOnnxFailsToParse) {
     EXPECT_EQ(engine.status().code(), StatusCode::kTensorRtError);
 }
 
-TEST(EngineBuilder, Fp8RejectedOnAmpere) {
+TEST(EngineBuilder, Fp8OnAmpere) {
     auto info = queryDevice(0);
-    if (info.ok() && (info.value().computeMajor * 10 + info.value().computeMinor) >= 89) {
-        GTEST_SKIP() << "device supports FP8";
-    }
+    ASSERT_TRUE(info.ok());
+    const bool fp8Supported = (info.value().computeMajor * 10 + info.value().computeMinor) >= 89;
     EngineBuilder builder;
     BuildOptions options;
     options.precision = Precision::kFp8;
     auto engine = builder.buildFromOnnxFile(modelPath("relu_1x3x8x8.onnx"), options);
-    EXPECT_FALSE(engine.ok());
-    EXPECT_EQ(engine.status().code(), StatusCode::kUnsupported);
+    if (fp8Supported) {
+        ASSERT_TRUE(engine.ok()) << engine.status().message();
+    } else {
+        ASSERT_FALSE(engine.ok());
+        EXPECT_EQ(engine.status().code(), StatusCode::kUnsupported);
+    }
 }
 
 TEST(EngineBuilder, BuildOrLoadCacheHitMissStale) {

@@ -54,6 +54,18 @@ endif()
 if(TRT_CPP_API_WITH_OPENCV)
     add_executable(trtcpp_opencv_tests test_opencv_interop.cpp)
     target_link_libraries(trtcpp_opencv_tests PRIVATE tensorrt_cpp_api::tensorrt_cpp_api ${OpenCV_LIBS} GTest::gtest_main)
+
+    if(WIN32)
+        # Make OpenCV DLLs available during test discovery and at runtime.
+        set(_opencv_bin "${OpenCV_DIR}/bin/$<CONFIG>")
+        set_property(TARGET trtcpp_opencv_tests APPEND PROPERTY
+            VS_DEBUGGER_ENVIRONMENT "PATH=${_opencv_bin};$ENV{PATH}")
+        add_custom_command(TARGET trtcpp_opencv_tests POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${_opencv_bin}/opencv_core4130.dll"
+                "$<TARGET_FILE_DIR:trtcpp_opencv_tests>/"
+            COMMAND_EXPAND_LISTS)
+    endif()
     gtest_discover_tests(trtcpp_opencv_tests PROPERTIES LABELS "gpu")
 endif()
 

@@ -31,6 +31,10 @@ Result<TensorView> viewOf(const cv::Mat &mat, Layout layout = Layout::kNHWC);
 /// Upload a cv::Mat to a freshly allocated device Tensor (async on `stream`).
 Result<Tensor> upload(const cv::Mat &mat, const Stream &stream);
 
+/// Copy a (potentially pitched) GpuMat into a freshly allocated continuous device Tensor
+/// using cudaMemcpy2DAsync. Unlike opencv::viewOf, this handles padded rows. Async on `stream`.
+Result<Tensor> copyTo(const cv::cuda::GpuMat &mat, const Stream &stream);
+
 } // namespace trtcpp::opencv
 
 #endif // TRT_CPP_API_WITH_OPENCV

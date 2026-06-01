@@ -86,12 +86,12 @@ Single-stream inference latency (preallocated, zero-copy `enqueue` loop — `exa
 | YOLOv8n | FP32 | 2.00 ms | 499 inf/s |
 | MobileNetV2 | FP16 | 0.31 ms | 3199 inf/s |
 
-**RTX 4060** (TensorRT 11, Windows/MSVC):
+**RTX 4060** (TensorRT 10.16, CUDA 13.2, Windows/MSVC):
 
 | Model | Precision | Config | Latency | Throughput |
 |---|---|---|---|---|
-| YOLO11n | FP16 | Release | **1.59 ms** | 629 inf/s |
-| YOLO11n | FP16 | Debug | 1.60 ms | 627 inf/s |
+| YOLOv8n | FP16 | Release | **1.35 ms** | 743 inf/s |
+| YOLOv8n | FP16 | Debug | 1.84 ms | 544 inf/s |
 
 The two tables are **not directly comparable** — they differ in several dimensions:
 
@@ -99,22 +99,57 @@ The two tables are **not directly comparable** — they differ in several dimens
 |---|---|---|
 | GPU arch | Ampere GA104 | Ada Lovelace AD106 |
 | TGP / power | ~130 W (mobile) | ~115 W (desktop) |
-| TensorRT | 10 (Linux) | 11 (Windows) |
-| Model | YOLOv8n (v8 arch) | YOLO11n (v11 arch, ~15% larger GFLOPs) |
+| TensorRT | 10 (Linux) | 10.16 (Windows) |
+| Model | YOLOv8n | YOLOv8n |
 | Compiler backend | disabled | enabled (TensorRT 11 default) |
 | Build config | Release (GCC) | Release (MSVC) |
 
-Debug and Release are within measurement noise (~0.3%): the GPU kernel execution dominates wall
-time, so the CPU-side Debug-vs-Release overhead is negligible in the GPU-bound inference path.
+The **end-to-end** breakdown (including decode, preproc, infer, post-process, and output) shows a
+wider gap between Debug and Release when CPU-side work is significant:
 
-The 3080 Laptop's lower latency reflects the lighter YOLOv8n model and Linux-native toolchain. The
-4060 results demonstrate that the library builds and runs correctly on Windows/MSVC with
-TensorRT 11, including the compiler-backed engine optimization path. Inference time is
-TensorRT-bound — it is the `enqueueV3` cost of the engine itself, so the wrapper
+| Example | Release | Debug | Slowdown |
+|---|---|---|---|
+| Classification (MobileNetV2) | 0.31 s | 0.59 s | 1.9x |
+| Detection (YOLOv8n) | 0.34 s | 0.63 s | 1.8x |
+| Segmentation (DeepLabV3) | 0.48 s | 1.35 s | 2.8x |
+| Benchmark (YOLOv8n, infer only) | 1.35 ms | 1.84 ms | 1.4x |
+
+The benchmark's GPU-bound inference loop is tight, so the Debug penalty is smaller (1.4x). The
+end-to-end examples include CPU-heavy post-processing (softmax, NMS, argmax, image encode),
+where the debug CRT and unoptimized MSVC codegen add 1.8–2.8x overhead.
+
+Inference time is TensorRT-bound — it is the `enqueueV3` cost of the engine itself, so the wrapper
 adds **no** measurable inference overhead. The library's work is everything around that call:
 zero-copy name-keyed IO with no per-call allocations or nested-vector copies, a stream-ordered
 allocator, and the no-throw `Status`/`Result` API. The Python bindings run the same path within
 ~13% of C++ (`examples/python/benchmark_parity.py`).
+
+### Image I/O: stb vs OpenCV
+
+The reference examples use vendored **stb** for image decode (zero external dependencies). The
+library's optional **OpenCV interop** (`opencv::upload`, `opencv::copyTo`, opencv_interop.h) is
+available when `-DTRT_CPP_API_WITH_OPENCV=ON`. Three paths compared (RTX 4060, Release,
+810×1080 JPEG, 20 iters):
+
+| Example | stb | OpenCV imread+upload | GpuMat+copyTo |
+|---|---|---|---|
+| Classification (MobileNetV2) | 8.49 ms | **6.55 ms** | 7.04 ms |
+| Detection (YOLOv8n) | 8.14 ms | **8.05 ms** | 8.30 ms |
+| Segmentation (DeepLabV3) | 9.00 ms | **8.76 ms** | 9.20 ms |
+
+**I/O-only breakdown:**
+
+| Path | Time |
+|---|---|
+| stb decode + upload | 5.93 ms |
+| OpenCV imread + upload | **5.86 ms** |
+| GpuMat upload + copyTo (`cudaMemcpy2DAsync`) | **0.99 ms** |
+| Upload only (cached source, either) | ~0.60 ms |
+
+`cv::imread` decodes JPEG ~4% faster than stb on this system. `opencv::copyTo` uses
+`cudaMemcpy2DAsync` under the hood, handling pitched (non-continuous) GpuMat rows without a CPU
+round-trip — the fastest path when a GpuMat is already resident on the GPU. When starting from
+a file, `imread+upload` is the most efficient decode-to-GPU pipeline.
 
 ## Install
 
@@ -154,13 +189,12 @@ apt vs tarball TensorRT, build options, Python — are in [`docs/install.md`](do
 **classification** (ImageNet top-5), **detection** (YOLOv8n/YOLO11 + NMS), **segmentation** (DeepLabV3),
 and a **benchmark** (C++ latency baseline). `examples/download_models.sh` fetches the models.
 
-| Example | Model | Data | Result |
-|---|---|---|---|
-| `classification` | MobileNetV2 (FP16) | 1920×1280 RGB | top-5 predicted, class 652 @ 42% |
-| `detection` | YOLO11n (FP16) | 1920×1280 RGB | 9 detections (all person, ≥70% conf) |
-| `segmentation` | DeepLabV3-MobileNetV3 (FP16) | 1920×1280 RGB | 21 classes, 65.9% background |
-| `benchmark` (Debug) | YOLO11n (FP16) | synthetic (preallocated) | 1.60 ms/infer (627 inf/s) over 1000 iters |
-| `benchmark` (Release) | YOLO11n (FP16) | synthetic (preallocated) | **1.59 ms/infer** (629 inf/s) over 1000 iters |
+| Example | Model | Data | Release | Debug |
+|---|---|---|---|---|---|
+| `classification` | MobileNetV2 (FP16) | 810×1080 RGB | **0.31 s** e2e, class 734 @ 44.5% | 0.59 s e2e |
+| `detection` | YOLOv8n (FP16) | 810×1080 RGB | **0.34 s** e2e, 5 detections (bus + 4 persons) | 0.63 s e2e |
+| `segmentation` | DeepLabV3-MobileNetV3 (FP16) | 810×1080 RGB | **0.48 s** e2e, 21 classes (56.5% background) | 1.35 s e2e |
+| `benchmark` (infer only) | YOLOv8n (FP16) | synthetic (preallocated) | **1.35 ms/infer** (743 inf/s) over 100 iters | 1.84 ms/infer (544 inf/s) |
 
 Run any example from the project root (the binary path varies by build system):
 

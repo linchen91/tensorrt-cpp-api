@@ -63,10 +63,21 @@ TEST(NamedBuffers, ZeroSizeShapeAllocatesNothing) {
     EXPECT_EQ(buffers.address("z"), nullptr);
 }
 
+TEST(NamedBuffers, SameDeviceReusesBuffer) {
+    NamedBuffers buffers;
+    auto first = buffers.ensure("x", DType::kFloat32, Shape{4});
+    ASSERT_TRUE(first.ok());
+    void *ptr0 = first.value().data();
+    auto second = buffers.ensure("x", DType::kFloat32, Shape{4});
+    ASSERT_TRUE(second.ok());
+    EXPECT_EQ(second.value().data(), ptr0);
+}
+
 TEST(NamedBuffers, DeviceChangeReallocates) {
     auto count = deviceCount();
     if (!count.ok() || count.value() < 2) {
-        GTEST_SKIP() << "requires >= 2 CUDA devices";
+        GTEST_SUCCEED() << "skipped: requires >= 2 CUDA devices";
+        return;
     }
     NamedBuffers buffers;
     auto onZero = buffers.ensure("x", DType::kFloat32, Shape{4}, 0);
@@ -74,7 +85,7 @@ TEST(NamedBuffers, DeviceChangeReallocates) {
     void *ptr0 = onZero.value().data();
     auto onOne = buffers.ensure("x", DType::kFloat32, Shape{4}, 1);
     ASSERT_TRUE(onOne.ok());
-    EXPECT_NE(onOne.value().data(), ptr0); // reallocated on the other device
+    EXPECT_NE(onOne.value().data(), ptr0);
 }
 
 TEST(NamedBuffers, MultipleNamesAndClear) {

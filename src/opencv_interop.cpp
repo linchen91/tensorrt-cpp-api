@@ -78,6 +78,30 @@ Result<Tensor> upload(const cv::Mat &mat, const Stream &stream) {
     return std::move(device).value();
 }
 
+Result<Tensor> copyTo(const cv::cuda::GpuMat &mat, const Stream &stream) {
+    if (mat.empty()) {
+        return Status{StatusCode::kInvalidArgument, "empty GpuMat"};
+    }
+    auto dtype = dtypeOfCvDepth(mat.depth());
+    if (!dtype) {
+        return dtype.status();
+    }
+    const Shape shape{mat.rows, mat.cols, mat.channels()};
+    auto device = Tensor::allocate(dtype.value(), shape, Device::kCuda);
+    if (!device) {
+        return device.status();
+    }
+    const std::size_t rowBytes = static_cast<std::size_t>(mat.cols) * mat.elemSize();
+    if (Status s = cudaToStatus(cudaMemcpy2DAsync(device.value().data(), rowBytes,
+                                                  mat.cudaPtr(), static_cast<std::size_t>(mat.step),
+                                                  rowBytes, static_cast<std::size_t>(mat.rows),
+                                                  cudaMemcpyDeviceToDevice, stream.handle()),
+                                "cudaMemcpy2DAsync"); !s) {
+        return s;
+    }
+    return std::move(device).value();
+}
+
 } // namespace trtcpp::opencv
 
 #endif // TRT_CPP_API_WITH_OPENCV
