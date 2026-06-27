@@ -220,7 +220,69 @@ Preprocessing-only comparison (isolated, no decode) on the same system (640×640
 ./build/examples/pipeline_comparison detection yolov8n.onnx image.jpg out.jpg 200 50
 ./build/examples/pipeline_comparison classification mobilenetv2.onnx image.jpg
 ./build/examples/pipeline_comparison segmentation deeplabv3.onnx image.jpg
+
+# Windows (MSVC multi-config, Debug — note the "d" suffix)
+.\preproc_comparisond.exe ..\..\..\models\yolov8n.onnx ..\..\..\models\test_img.jpg 640 640 500 100
+.\pipeline_comparisond.exe detection ..\..\..\models\yolov8n.onnx ..\..\..\models\test_img.jpg pipeline_det.jpg 500 100 640x640
+.\pipeline_comparisond.exe classification ..\..\..\models\mobilenetv2-7.onnx ..\..\..\models\test_img.jpg
+.\pipeline_comparisond.exe segmentation ..\..\..\models\deeplabv3_mobilenetv3.onnx ..\..\..\models\test_img.jpg pipeline_seg.jpg 200 50 520x520
+
+# Windows (MSVC multi-config, Release — no suffix)
+.\preproc_comparison.exe ..\..\..\models\yolov8n.onnx ..\..\..\models\test_img.jpg 640 640 500 100
+.\pipeline_comparison.exe detection ..\..\..\models\yolov8n.onnx ..\..\..\models\test_img.jpg pipeline_det.jpg 500 100 640x640
+.\pipeline_comparison.exe classification ..\..\..\models\mobilenetv2-7.onnx ..\..\..\models\test_img.jpg
+.\pipeline_comparison.exe segmentation ..\..\..\models\deeplabv3_mobilenetv3.onnx ..\..\..\models\test_img.jpg pipeline_seg.jpg 200 50 520x520
 ```
+
+========== Preprocessing Performance ==========
+Input: 810 x 1080  ->  Output: 640 x 640
+Spec: letterbox=1  swapRB=0  scale=1/255  iters=500
+
+Method        Avg(ms)   Min(ms)   Max(ms)   Img/s
+------        -------   -------   -------   -----
+Fused           0.0449    0.0444    0.0764     22262
+OpenCV          0.0866    0.0739    0.1769     11552
+
+OpenCV is 1.9 x slower than fused (preproc only)
+Preproc output  MSE: 1.29e-03  MaxDiff: 3.73e-01
+
+========== Inference (500 iters) ==========
+Method        Avg(ms)   Min(ms)   Max(ms)   Inf/s
+------        -------   -------   -------   -----
+Fused           1.2709    1.0636   35.1800       787
+OpenCV          1.1841    1.0807    1.4016       844
+
+==========================================================================
+ Full-Pipeline: detection
+ Model: ..\..\..\models\yolov8n.onnx
+ Image: 810 x 1080  ->  Network: 640 x 640
+ Iters: 500  (warmup: 100)
+==========================================================================
+ Stage                       Without OpenCV    With OpenCV
+ -------------------------   --------------    -----------
+ Decode                      4.8601 ms          4.8498 ms
+ Upload                      0.0000 ms          0.5564 ms
+ Preprocess                  0.1767 ms          0.1373 ms
+ Inference                   1.3471 ms          1.3471 ms
+ Postprocess                 0.4251 ms          0.4251 ms
+ -------------------------   --------------    -----------
+ Total pipeline              6.8089 ms          7.3157 ms
+
+==========================================================================
+ Full-Pipeline: segmentation
+ Model: ..\..\..\models\deeplabv3_mobilenetv3.onnx
+ Image: 810 x 1080  ->  Network: 520 x 520
+ Iters: 200  (warmup: 50)
+==========================================================================
+ Stage                       Without OpenCV    With OpenCV
+ -------------------------   --------------    -----------
+ Decode                      4.8481 ms          4.8403 ms
+ Upload                      0.0000 ms          0.5521 ms
+ Preprocess                  0.1393 ms          0.1155 ms
+ Inference                   1.5770 ms          1.5770 ms
+ Postprocess                 5.4531 ms          5.4531 ms
+ -------------------------   --------------    -----------
+ Total pipeline             12.0174 ms         12.5379 ms
 
 ## Install
 

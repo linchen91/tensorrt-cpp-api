@@ -6,7 +6,7 @@
 //
 // Usage:
 //   pipeline_comparison <mode=detection|classification|segmentation> <model.onnx|engine>
-//                       <image> [out.jpg iters=200 warmup=50]
+//                       <image> [out.jpg iters=200 warmup=50 [WxH]]
 //
 // Without-OpenCV path:  stb (CPU) -> uploadHWC -> preproc::letterboxToTensor -> engine
 // With-OpenCV path:     cv::imread (CPU) -> GpuMat upload -> resize/cvtColor/split/convertTo -> engine
@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <numeric>
 #include <string>
@@ -122,7 +123,7 @@ static void opencvPreproc(const TensorView &src, TensorView dst, const preproc::
         auto t0 = chrono::steady_clock::now();
         int newW = outW, newH = outH;
         if (spec.keepAspectRatioPad) {
-            float scale = std::min(static_cast<float>(outW) / W, static_cast<float>(outH) / H);
+            const float scale = std::min(static_cast<float>(outW) / W, static_cast<float>(outH) / H);
             newW = static_cast<int>(std::lround(W * scale));
             newH = static_cast<int>(std::lround(H * scale));
             newW = std::min(newW, outW);
@@ -247,7 +248,7 @@ static std::array<Rgb, 256> vocPalette() {
 int main(int argc, char **argv) {
     if (argc < 4) {
         std::fprintf(stderr, "usage: %s <mode=detection|classification|segmentation> "
-                             "<model.onnx|engine> <image> [out.jpg iters=200 warmup=50]\n",
+                             "<model.onnx|engine> <image> [out.jpg iters=200 warmup=50 [WxH]]\n",
                      argv[0]);
         return 2;
     }
@@ -259,12 +260,31 @@ int main(int argc, char **argv) {
     int iters = argc > 5 ? std::atoi(argv[5]) : 200;
     int warmup = argc > 6 ? std::atoi(argv[6]) : 50;
 
+    std::string optRes = argc > 7 ? argv[7] : "";
+
     // ----------------------------------------------------------------
     // Build engine
     // ----------------------------------------------------------------
     BuildOptions bo;
     bo.precision = Precision::kFp16;
     bo.engineCacheDir = "engines";
+
+    // Optional resolution override from command line (WxH, e.g. 512x512).
+    // Sets up a dynamic optimization profile so the engine is built for the
+    // requested size. The input name is resolved after the first engine load.
+    int inH = 0, inW = 0;
+    bool haveRes = false;
+    if (!optRes.empty()) {
+        auto xPos = optRes.find('x');
+        if (xPos == std::string::npos || xPos == 0 || xPos == optRes.size() - 1) {
+            std::fprintf(stderr, "invalid resolution '%s'; use WxH (e.g. 512x512)\n", optRes.c_str());
+            return 2;
+        }
+        inW = std::atoi(optRes.substr(0, xPos).c_str());
+        inH = std::atoi(optRes.substr(xPos + 1).c_str());
+        haveRes = true;
+    }
+
     auto engine = EngineBuilder{}.buildAndLoad(modelPath, bo);
     if (!engine) {
         std::fprintf(stderr, "engine: %s\n", engine.status().message().c_str());
@@ -274,9 +294,44 @@ int main(int argc, char **argv) {
     auto inName = engine->inputNames().front();
     auto outName = engine->outputNames().front();
     auto inShape = engine->tensorShape(inName).value();
-    auto outShape = engine->tensorShape(outName).value();
-    int inH = static_cast<int>(inShape[2]);
-    int inW = static_cast<int>(inShape[3]);
+
+    // If resolution was specified, rebuild with a proper optimization profile
+    // that includes the requested size range.
+    if (haveRes) {
+        auto nativeW = static_cast<int>(inShape[3]);
+        auto nativeH = static_cast<int>(inShape[2]);
+        if (inW != nativeW || inH != nativeH) {
+            if (!inShape.isDynamic()) {
+                std::fprintf(stderr, "cannot override resolution: model has static input shape "
+                                     "[%s]; export ONNX with dynamic input dims or use a model "
+                                     "natively at %dx%d\n",
+                             inShape.toString().c_str(), inW, inH);
+                return 1;
+            }
+            ProfileShape ps;
+            ps.inputName = inName;
+            int minW = std::min(inW, nativeW), minH = std::min(inH, nativeH);
+            int maxW = std::max(inW, nativeW), maxH = std::max(inH, nativeH);
+            ps.min = Shape{1, 3, minH, minW};
+            ps.opt = Shape{1, 3, inH, inW};
+            ps.max = Shape{1, 3, maxH, maxW};
+            bo.profiles.push_back(OptimizationProfile{{ps}});
+            engine = EngineBuilder{}.buildAndLoad(modelPath, bo);
+            if (!engine) {
+                std::fprintf(stderr, "engine (profile): %s\n", engine.status().message().c_str());
+                return 1;
+            }
+            inShape = engine->tensorShape(inName).value();
+        }
+        std::fprintf(stderr, "overriding resolution to %dx%d (model native: %dx%d)\n",
+                     inW, inH, nativeW, nativeH);
+    } else {
+        inH = static_cast<int>(inShape[2]);
+        inW = static_cast<int>(inShape[3]);
+    }
+    // Resolve output shape at runtime (matches what inferSingle uses internally)
+    TensorView shapeOnly{nullptr, DType::kFloat32, inShape, Device::kHost};
+    auto outShape = engine->outputShapes({{inName, shapeOnly}}, 0).value()[outName];
     int outC = static_cast<int>(outShape[1]);
     int outH = static_cast<int>(outShape[2]);
     int outW = static_cast<int>(outShape[3]);
@@ -335,7 +390,18 @@ int main(int argc, char **argv) {
     // ----------------------------------------------------------------
     std::fprintf(stderr, "Warming up (%d iters)...\n", warmup);
     stbImg = examples::decodeImage(imagePath);
-    cvImgHost = cv::imread(imagePath);
+    if (stbImg.empty()) {
+        std::fprintf(stderr, "could not read image: %s\n", imagePath.c_str());
+        return 1;
+    }
+    cvImgHost = cv::imread(imagePath, cv::IMREAD_COLOR);
+    bool haveOpenCV = !cvImgHost.empty();
+    if (cvImgHost.empty()) {
+        std::fprintf(stderr, "cv::imread failed for '%s', converting stb image to cv::Mat (BGR)\n", imagePath.c_str());
+        cvImgHost = cv::Mat(stbImg.height, stbImg.width, CV_8UC3);
+        std::memcpy(cvImgHost.data, stbImg.data.data(), stbImg.data.size());
+        cv::cvtColor(cvImgHost, cvImgHost, cv::COLOR_RGB2BGR);
+    }
     for (int i = 0; i < warmup; ++i) {
         // stb path
         {
@@ -344,8 +410,8 @@ int main(int argc, char **argv) {
             engine->enqueue(inputs, {{outName, outStb.view()}}, stream);
             stream.synchronize();
         }
-        // OpenCV path
-        {
+        // OpenCV path (skip when cv::imread failed — OpenCV CUDA modules may be broken)
+        if (haveOpenCV) {
             cv::cuda::GpuMat gpuSrc;
             gpuSrc.upload(cvImgHost);
             TensorView cvSrc(gpuSrc.data, DType::kUInt8,
@@ -385,47 +451,61 @@ int main(int argc, char **argv) {
     // ----------------------------------------------------------------
     // Benchmark: With OpenCV (cv::imread + GpuMat + resize/cvtColor/split/convertTo + infer)
     // ----------------------------------------------------------------
-    std::fprintf(stderr, "Benchmarking with-OpenCV pipeline (%d iters)...\n", iters);
-    for (int i = 0; i < iters; ++i) {
-        // Decode (CPU)
-        auto t0 = chrono::steady_clock::now();
-        cvImgHost = cv::imread(imagePath);
-        accum(t_cv_decode, elapsedMs(t0));
+    if (haveOpenCV) {
+        std::fprintf(stderr, "Benchmarking with-OpenCV pipeline (%d iters)...\n", iters);
+        for (int i = 0; i < iters; ++i) {
+            // Decode (CPU)
+            auto t0 = chrono::steady_clock::now();
+            cvImgHost = cv::imread(imagePath, cv::IMREAD_COLOR);
+            if (cvImgHost.empty()) {
+                std::fprintf(stderr, "cv::imread failed for '%s', converting stb image to cv::Mat (BGR)\n", imagePath.c_str());
+                cvImgHost = cv::Mat(stbImg.height, stbImg.width, CV_8UC3);
+                std::memcpy(cvImgHost.data, stbImg.data.data(), stbImg.data.size());
+                cv::cvtColor(cvImgHost, cvImgHost, cv::COLOR_RGB2BGR);
+            }
+            accum(t_cv_decode, elapsedMs(t0));
 
-        // Upload to GPU (default stream)
-        t0 = chrono::steady_clock::now();
-        cv::cuda::GpuMat gpuSrc;
-        gpuSrc.upload(cvImgHost);
-        accum(t_cv_upload, deviceSyncElapsed(t0));
+            // Upload to GPU (default stream)
+            t0 = chrono::steady_clock::now();
+            cv::cuda::GpuMat gpuSrc;
+            gpuSrc.upload(cvImgHost);
+            accum(t_cv_upload, deviceSyncElapsed(t0));
 
-        // Preproc (OpenCV, on default stream, timed internally per-substage)
-        TensorView cvSrc(gpuSrc.data, DType::kUInt8,
-                         Shape{cvImgHost.rows, cvImgHost.cols, cvImgHost.channels()},
-                         Device::kCuda);
-        opencvPreproc(cvSrc, dst.view(), specCv, cvBuf);
+            // Preproc (OpenCV, on default stream, timed internally per-substage)
+            TensorView cvSrc(gpuSrc.data, DType::kUInt8,
+                             Shape{cvImgHost.rows, cvImgHost.cols, cvImgHost.channels()},
+                             Device::kCuda);
+            opencvPreproc(cvSrc, dst.view(), specCv, cvBuf);
 
-        // Wait for OpenCV work, then copy to our stream for inference.
-        // Our dst Tensor is on device memory; OpenCV kernels on default stream
-        // have already completed (they sync inside opencvPreproc via deviceSyncElapsed).
-        // Enqueue inference on our stream.
-        t0 = chrono::steady_clock::now();
-        engine->enqueue(inputs, {{outName, outCv.view()}}, stream);
-        accum(t_infer, syncElapsed(stream, t0));
+            // Wait for OpenCV work, then copy to our stream for inference.
+            t0 = chrono::steady_clock::now();
+            engine->enqueue(inputs, {{outName, outCv.view()}}, stream);
+            accum(t_infer, syncElapsed(stream, t0));
+        }
+    } else {
+        std::fprintf(stderr, "Skipping with-OpenCV benchmark (cv::imread failed at warmup)\n");
     }
 
     // ----------------------------------------------------------------
-    // Postproc timing (identical for both pipelines)
+    // Postproc timing (identical for both pipelines).
+    // File I/O (JPG write, image re-decode) is excluded from the timed
+    // loop — only algorithmic work (NMS, argmax, colorize, softmax) is
+    // measured. A single final write produces the output file.
     // ----------------------------------------------------------------
     std::fprintf(stderr, "Benchmarking postproc (%d iters)...\n", iters);
+    const auto origImg = stbImg; // preserve for reuse across iterations
+    const auto palette = mode == Mode::Segmentation ? vocPalette() : std::array<Rgb, 256>{};
     for (int i = 0; i < iters; ++i) {
         auto host = outStb.toHost(stream).value();
         auto data = host.as<float>().value();
+        stbImg = origImg;
         auto t0 = chrono::steady_clock::now();
 
         if (mode == Mode::Detection) {
             const int nAnchors = static_cast<int>(host.shape()[2]);
-            const float r = std::min(static_cast<float>(inW) / stbImg.width,
-                                     static_cast<float>(inH) / stbImg.height);
+            const float r = std::min(static_cast<float>(inW) / origImg.width,
+                                     static_cast<float>(inH) / origImg.height);
+
             std::vector<Detection> dets;
             for (int a = 0; a < nAnchors; ++a) {
                 int bestCls = 0;
@@ -443,10 +523,8 @@ int main(int argc, char **argv) {
                                 static_cast<int>((cy + h / 2) / r), bestScore, bestCls});
             }
             auto kept = nms(std::move(dets), 0.45f);
-            // Draw and write
             for (const auto &d : kept)
                 examples::drawRect(stbImg, d.x0, d.y0, d.x1, d.y1, 0, 220, 0, 3);
-            examples::writeJpg(outPath, stbImg);
         } else if (mode == Mode::Classification) {
             float maxLogit = *std::max_element(data.begin(), data.end());
             std::vector<float> probs(data.size());
@@ -455,8 +533,6 @@ int main(int argc, char **argv) {
                 probs[j] = std::exp(data[j] - maxLogit);
                 sum += probs[j];
             }
-            // Re-decode for next iteration (re-use stbImg)
-            stbImg = examples::decodeImage(imagePath);
         } else if (mode == Mode::Segmentation) {
             const int plane = outH * outW;
             std::vector<std::uint8_t> classMap(static_cast<std::size_t>(plane));
@@ -469,99 +545,89 @@ int main(int argc, char **argv) {
                 }
                 classMap[static_cast<std::size_t>(p)] = static_cast<std::uint8_t>(best);
             }
-            auto palette = vocPalette();
-            examples::Image overlay = stbImg;
-            for (int y = 0; y < stbImg.height; ++y) {
-                int sy = y * outH / stbImg.height;
-                for (int x = 0; x < stbImg.width; ++x) {
-                    int sx = x * outW / stbImg.width;
+            examples::Image overlay = origImg;
+            for (int y = 0; y < origImg.height; ++y) {
+                int sy = y * outH / origImg.height;
+                for (int x = 0; x < origImg.width; ++x) {
+                    int sx = x * outW / origImg.width;
                     auto col = palette[classMap[static_cast<std::size_t>(sy) * outW + sx]];
-                    auto *px = &overlay.data[(static_cast<std::size_t>(y) * stbImg.width + x) * 3];
+                    auto *px = &overlay.data[(static_cast<std::size_t>(y) * origImg.width + x) * 3];
                     px[0] = static_cast<std::uint8_t>((px[0] + col.r) / 2);
                     px[1] = static_cast<std::uint8_t>((px[1] + col.g) / 2);
                     px[2] = static_cast<std::uint8_t>((px[2] + col.b) / 2);
                 }
             }
-            examples::writeJpg(outPath, overlay);
+            stbImg = overlay;
         }
 
         accum(t_postproc, elapsedMs(t0));
     }
-
-    // ----------------------------------------------------------------
-    // Numerical validation: compare inference outputs
-    // ----------------------------------------------------------------
-    auto hostStb = outStb.toHost(stream).value();
-    auto hostCv = outCv.toHost(stream).value();
-    auto dataStb = hostStb.as<float>().value();
-    auto dataCv = hostCv.as<float>().value();
-    double mse = 0, maxDiff = 0;
-    const auto n = hostStb.nbytes() / sizeof(float);
-    for (std::size_t i = 0; i < n; ++i) {
-        double d = std::abs(static_cast<double>(dataStb[i]) - static_cast<double>(dataCv[i]));
-        mse += d * d;
-        if (d > maxDiff) maxDiff = d;
+    // Single write at the end for the output file
+    if (mode == Mode::Detection || mode == Mode::Segmentation) {
+        examples::writeJpg(outPath, stbImg);
+        std::fprintf(stderr, "wrote %s\n", outPath.c_str());
     }
-    mse /= static_cast<double>(n);
 
     // ----------------------------------------------------------------
     // Print results
     // ----------------------------------------------------------------
     auto totalMs = [](const Timing &t) { return t.avg(); };
+    auto subTotal = [](const Timing *t, int n) {
+        double s = 0;
+        for (int i = 0; i < n; ++i) s += t[i].avg();
+        return s;
+    };
 
-    // Total pipeline time per method
-    // Note: upload is folded into the preproc stage for the without-OpenCV path
-    // (uploadHWC returns immediately, the H2D copy overlaps with the preproc kernel).
     double noCvTotal = totalMs(t_noCv_decode) + totalMs(t_noCv_preproc) +
                        totalMs(t_infer) + totalMs(t_postproc);
-    double cvPreprocTotal = totalMs(cvBuf.sub[0]) + totalMs(cvBuf.sub[1]) +
-                            totalMs(cvBuf.sub[2]) + totalMs(cvBuf.sub[3]) + totalMs(cvBuf.sub[4]);
-    double cvTotal = totalMs(t_cv_decode) + totalMs(t_cv_upload) +
-                     cvPreprocTotal + totalMs(t_infer) + totalMs(t_postproc);
-
-    auto ratio = [](double a, double b) { return b > 0 ? a / b : 0; };
-    auto printRow = [](const char *label, double noCv, double cv) {
-        std::printf(" %-24s  %9.4f ms   %9.4f ms   %6.2fx\n", label, noCv, cv,
-                    cv > 0 ? noCv / cv : 0);
-    };
+    double cvPreproc = subTotal(cvBuf.sub, 5);
+    double cvTotal = totalMs(t_cv_decode) + totalMs(t_cv_upload) + cvPreproc +
+                     totalMs(t_infer) + totalMs(t_postproc);
 
     std::printf("\n");
     std::printf("==========================================================================\n");
-    std::printf(" Full-Pipeline Comparison: %s\n", modeName(mode));
+    std::printf(" Full-Pipeline: %s\n", modeName(mode));
     std::printf(" Model: %s\n", modelPath.c_str());
     std::printf(" Image: %d x %d  ->  Network: %d x %d\n", stbImg.width, stbImg.height, inW, inH);
     std::printf(" Iters: %d  (warmup: %d)\n", iters, warmup);
-    std::printf(" Spec : letterbox=%d  swapRB(stb)=%d  swapRB(cv)=%d\n",
-                specStb.keepAspectRatioPad, specStb.swapRB, specCv.swapRB);
     std::printf("==========================================================================\n");
-    std::printf(" Stage                       Without OpenCV    With OpenCV      Ratio\n");
-    std::printf(" -------------------------   --------------   -------------   ------\n");
-    printRow("Decode",          totalMs(t_noCv_decode), totalMs(t_cv_decode));
-    double noCvUpload = 0; // folded into preproc for stb path
-    printRow("Upload to GPU",   noCvUpload, totalMs(t_cv_upload));
-    printRow("Preprocess",      totalMs(t_noCv_preproc), cvPreprocTotal);
-    // OpenCV substages
-    auto printSub = [&](const char *label, int idx) {
-        std::printf("  + %-22s  %9s   %9.4f ms\n", label, "N/A", totalMs(cvBuf.sub[idx]));
-    };
-    printSub("resize", 0);
-    printSub("cvtColor", 1);
-    printSub("pad", 2);
-    printSub("split", 3);
-    printSub("norm+layout", 4);
+    std::printf(" Stage                       Without OpenCV    With OpenCV\n");
+    std::printf(" -------------------------   --------------    -----------\n");
+    std::printf(" %-23s  %9.4f ms       %9.4f ms\n", "Decode",
+                totalMs(t_noCv_decode), totalMs(t_cv_decode));
+    std::printf(" %-23s  %9.4f ms       %9.4f ms\n", "Upload",
+                0.0, totalMs(t_cv_upload));
+    std::printf(" %-23s  %9.4f ms       %9.4f ms\n", "Preprocess",
+                totalMs(t_noCv_preproc), cvPreproc);
+    std::printf(" %-23s  %9.4f ms       %9.4f ms\n", "Inference",
+                totalMs(t_infer), totalMs(t_infer));
+    std::printf(" %-23s  %9.4f ms       %9.4f ms\n", "Postprocess",
+                totalMs(t_postproc), totalMs(t_postproc));
+    std::printf(" -------------------------   --------------    -----------\n");
+    std::printf(" %-23s  %9.4f ms       %9.4f ms\n", "Total pipeline", noCvTotal, cvTotal);
 
-    double infAvg = totalMs(t_infer); // same accumulator for both
-    printRow("Inference", infAvg, infAvg);
-    printRow("Postprocess", totalMs(t_postproc), totalMs(t_postproc));
-
-    std::printf(" -------------------------   --------------   -------------   ------\n");
-    printRow("Total pipeline", noCvTotal, cvTotal);
-    std::printf("\n Numerical validation:\n");
-    std::printf("   Inference output  MSE: %.2e  MaxDiff: %.2e\n", mse, maxDiff);
-    if (maxDiff < 1e-3f)
-        std::printf("   => Outputs match within floating-point tolerance.\n");
-    else
-        std::printf("   => WARNING: outputs differ significantly.\n");
+    if (haveOpenCV) {
+        auto hostStb = outStb.toHost(stream).value();
+        auto hostCv = outCv.toHost(stream).value();
+        auto dataStb = hostStb.as<float>().value();
+        auto dataCv = hostCv.as<float>().value();
+        double mse = 0, maxDiff = 0;
+        const auto n = hostStb.nbytes() / sizeof(float);
+        for (std::size_t i = 0; i < n; ++i) {
+            double d = std::abs(static_cast<double>(dataStb[i]) - static_cast<double>(dataCv[i]));
+            mse += d * d;
+            if (d > maxDiff) maxDiff = d;
+        }
+        mse /= static_cast<double>(n);
+        std::printf("\n Numerical validation:\n");
+        std::printf("   Inference output  MSE: %.2e  MaxDiff: %.2e\n", mse, maxDiff);
+        if (maxDiff < 1e-3f)
+            std::printf("   => Outputs match within floating-point tolerance.\n");
+        else
+            std::printf("   => WARNING: outputs differ significantly.\n");
+    } else {
+        std::printf("\n OpenCV pipeline unavailable — stb-only results shown.\n");
+    }
     std::printf("\n");
 
     return 0;

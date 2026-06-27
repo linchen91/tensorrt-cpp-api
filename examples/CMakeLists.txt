@@ -44,6 +44,11 @@ endif()
 
 # OpenCV-dependent examples: fused preproc kernel vs OpenCV GPU operations.
 # Single find_package call -- components checked once; ${OpenCV_LIBS} available below.
+# Map Debug->Release for OpenCV imported targets to avoid ABI mismatch when only
+# Release OpenCV libraries are available (no debug_build_guard symbol mangling).
+if(MSVC)
+    set(OPENCV_MAP_IMPORTED_CONFIG "RELWITHDEBINFO=!Release;MINSIZEREL=!Release")
+endif()
 find_package(OpenCV QUIET COMPONENTS core imgproc imgcodecs cudawarping cudaimgproc cudaarithm)
 if(OpenCV_FOUND)
     # Preprocessing-only benchmark (no model needed beyond timing context).
@@ -77,6 +82,36 @@ if(MSVC AND BUILD_SHARED_LIBS)
                     "$<TARGET_FILE:tensorrt_cpp_api>" "$<TARGET_FILE_DIR:${_tgt}>/"
                 COMMAND_EXPAND_LISTS
             )
+        endif()
+    endforeach()
+endif()
+
+# On Windows with OpenCV, copy required OpenCV DLLs next to the example executables so they
+# run from the build directory without needing OpenCV/bin on PATH.  The path pattern
+# x64/vc18/bin is the standard layout for official OpenCV Windows builds.
+if(MSVC AND OpenCV_FOUND)
+    set(_ocv_known_bin "${OpenCV_DIR}/x64/vc18/bin")
+    foreach(_tgt preproc_comparison pipeline_comparison)
+        if(TARGET ${_tgt})
+            foreach(_ocv_dll opencv_core4130 opencv_imgcodecs4130 opencv_imgproc4130
+                         opencv_cudaarithm4130 opencv_cudawarping4130 opencv_cudaimgproc4130)
+                add_custom_command(TARGET ${_tgt} PRE_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${_ocv_known_bin}/${_ocv_dll}.dll"
+                        "$<TARGET_FILE_DIR:${_tgt}>/"
+                    COMMAND_EXPAND_LISTS
+                )
+            endforeach()
+            foreach(_ocv_ext_dll jpeg62 libyuv)
+                if(EXISTS "${_ocv_known_bin}/${_ocv_ext_dll}.dll")
+                    add_custom_command(TARGET ${_tgt} PRE_BUILD
+                        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                            "${_ocv_known_bin}/${_ocv_ext_dll}.dll"
+                            "$<TARGET_FILE_DIR:${_tgt}>/"
+                        COMMAND_EXPAND_LISTS
+                    )
+                endif()
+            endforeach()
         endif()
     endforeach()
 endif()

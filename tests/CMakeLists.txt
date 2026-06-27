@@ -57,7 +57,7 @@ if(TRT_CPP_API_WITH_OPENCV)
 
     if(WIN32)
         # Make OpenCV DLLs available during test discovery and at runtime.
-        set(_opencv_bin "${OpenCV_DIR}/bin/$<CONFIG>")
+        set(_opencv_bin "${OpenCV_DIR}/x64/vc18/bin")
         set_property(TARGET trtcpp_opencv_tests APPEND PROPERTY
             VS_DEBUGGER_ENVIRONMENT "PATH=${_opencv_bin};$ENV{PATH}")
         add_custom_command(TARGET trtcpp_opencv_tests POST_BUILD
